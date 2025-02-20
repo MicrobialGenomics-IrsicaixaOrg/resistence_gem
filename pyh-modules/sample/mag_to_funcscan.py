@@ -10,7 +10,7 @@ from botocore.exceptions import NoCredentialsError
 # AWS S3 client
 s3_client = boto3.client("s3")
 
-############################ ASSEMBLY ######################################
+############################ DOWNLOAD, FILTER, MERGE, COMPRESS AND UPLOAD CONTIGS FROM METAGENOME ASSEMBLY ###################################### 
 
 def download_file(s3_bucket, s3_key, local_path):
     """Download a file from S3 if it does not exist locally."""
@@ -34,7 +34,7 @@ def download_files(sample_names, assembler, s3_base_path, local_dir):
                                                  os.path.join(local_dir, f"{assembler}-{sample}.contigs.fa.gz")), sample_names)
 
 def filter_sequences(sample_names, assembler, local_dir, min_length=1000):
-    """Filter sequences longer than min_length (default: 1000bp). [10.1534/g3.118.200745]"""
+    """Filter sequences longer than min_length (default: 1000bp). [doi:10.1534/g3.118.200745]"""
     for sample in sample_names:
         input_file = os.path.join(local_dir, f"{assembler}-{sample}.contigs.fa.gz")
         output_file = os.path.join(local_dir, f"{assembler}-{sample}_filtered.fa")
@@ -68,8 +68,8 @@ def upload_to_s3(local_path, s3_bucket, s3_key):
     except NoCredentialsError:
         print("AWS credentials not found. Please configure your credentials.")
 
-def process_samples(samplesheet_path, min_length=1000):
-    """Wrapper function to download, filter, merge, compress, and upload files to S3."""
+def generate_merged_filtered_contigs(samplesheet_path, min_length=1000):
+    """Wrapper function to download, filter, merge, compress, and upload contigs from metagenome assembly to S3, wich will be used as input to the funcscan pipeline"""
     df = pd.read_csv(samplesheet_path)
     sample_names = df["sample"].tolist()
     
@@ -98,9 +98,9 @@ def process_samples(samplesheet_path, min_length=1000):
         executor.map(lambda sample: upload_to_s3(os.path.join(merged_dir, f"{sample}_merged.fa.gz"), s3_bucket, f"Assembly/merged_results/{sample}_merged.fa.gz"), sample_names)
 
 # Run the process
-process_samples("samplesheet.csv", min_length=1000)
+generate_merged_filtered_contigs("samplesheet.csv", min_length=1000)
 
-############################ BINNING ######################################
+############################ DOWNLOAD, FILTER, MERGE, AND UPLOAD CONTIGS FROM FILTERED BINS FROM METAGENOME BINNING ######################################
 
 def upload_to_s3(local_file_path, bucket_name, s3_file_path):
     """Upload a file to S3."""
@@ -113,8 +113,8 @@ def upload_to_s3(local_file_path, bucket_name, s3_file_path):
         print(f"Error uploading {local_file_path}: {e}")
 
 # Main processing function with configurable parameters
-def process_bins(min_completeness=50, max_contamination=10, min_length=1000):
-    """Load samplesheet.csv and extract sample names [10.1534/g3.118.200745]"""
+def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min_length=1000):
+    """Function to download, filter, merge, and upload contigs from bins from metagenome binning to S3, wich will be used as input to the funcscan pipeline"""
     df = pd.read_csv("samplesheet.csv")
     sample_names = df["sample"].tolist()
 
@@ -162,7 +162,7 @@ def process_bins(min_completeness=50, max_contamination=10, min_length=1000):
     download_file_from_s3(f"{s3_base_path_qc}quast_summary.tsv", quast_file_local)
 
     def filter_high_quality_bins(busco_file, quast_file, min_completeness, max_contamination):
-        """Filter bins based on BUSCO completeness and QUAST contamination."""
+        """Filter bins based on BUSCO completeness and QUAST contamination. By default, min_completeness=50, max_contamination=10, and min_length=1000 [doi:10.1534/g3.118.200745]"""
         print("\nFiltering high-quality bins based on BUSCO and QUAST results...")
 
         busco_df = pd.read_csv(busco_file, sep="\t")
@@ -192,7 +192,7 @@ def process_bins(min_completeness=50, max_contamination=10, min_length=1000):
     # Get high-quality bins with .fa.gz extension
     high_quality_bins = filter_high_quality_bins(busco_file_local, quast_file_local, min_completeness, max_contamination)
 
-    # Function to filter sequences with seqkit (keeping sequences > 1000bp)
+    # Function to filter sequences with seqkit
     def filter_sequences_with_seqkit(input_file, output_file, min_length):
         """Filter sequences based on minimum length using seqkit."""
         print(f"Filtering sequences in {input_file} with seqkit (min length: {min_length})...")
@@ -270,5 +270,4 @@ def process_bins(min_completeness=50, max_contamination=10, min_length=1000):
                 s3_file_path = f"GenomeBinning/merged_results/{sample}_merged.fa.gz"
                 executor.submit(upload_to_s3, merged_file_path, s3_bucket, s3_file_path)
 
-# Example of calling the process_bins function with custom parameters
-process_bins(min_completeness=50, max_contamination=10, min_length=1000)
+generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min_length=1000)
