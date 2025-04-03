@@ -1,3 +1,18 @@
+#!/usr/bin/env python3
+"""
+Process metagenomic assembly and binning results for functional analysis pipeline.
+
+This script:
+1. Downloads assembly contigs (MEGAHIT and SPAdes) from S3
+2. Downloads binned contigs (MetaBAT2 and MaxBin2) from S3
+3. Filters sequences based on length and quality metrics
+4. Merges results from different tools
+5. Uploads processed files back to S3 with 'nf_mag' subfolder
+
+Usage:
+    python mag_to_funcscan.py
+"""
+
 import os
 import boto3
 import pandas as pd
@@ -5,45 +20,94 @@ import gzip
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 import subprocess
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import NoCredentialsError, ClientError
+import logging
+from typing import List
+
+# Configuration
+CONFIG = {
+    "min_contig_length": 1000,
+    "min_bin_completeness": 50,
+    "max_bin_contamination": 10,
+    "samplesheet_path": "samplesheet.csv",
+    "local_work_dir": "./processing_results",
+    "nf_mag_subfolder": "nf_mag"
+}
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # AWS S3 client
 s3_client = boto3.client("s3")
 
-############################ DOWNLOAD, FILTER, MERGE, COMPRESS AND UPLOAD CONTIGS FROM METAGENOME ASSEMBLY ###################################### 
+def upload_to_s3(local_path: str, s3_bucket: str, s3_key: str) -> None:
+    """Upload a file to S3 with comprehensive error handling."""
+    try:
+        logger.info(f"Uploading {local_path} to s3://{s3_bucket}/{s3_key}")
+        s3_client.upload_file(local_path, s3_bucket, s3_key)
+    except NoCredentialsError:
+        logger.error("AWS credentials not found. Please configure your credentials.")
+    except ClientError as e:
+        logger.error(f"AWS Client Error uploading {local_path}: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error uploading {local_path}: {e}")
 
-def download_file(s3_bucket, s3_key, local_path):
-    """Download a file from S3 if it does not exist locally."""
-    if not os.path.exists(local_path):
-        try:
-            print(f"Downloading {s3_key} from s3://{s3_bucket}/{s3_key}...")
+def download_file_from_s3(s3_bucket: str, s3_key: str, local_path: str) -> None:
+    """Download a file from S3 with error handling."""
+    try:
+        if not os.path.exists(local_path):
+            logger.info(f"Downloading s3://{s3_bucket}/{s3_key} to {local_path}")
             s3_client.download_file(s3_bucket, s3_key, local_path)
-        except NoCredentialsError:
-            print("AWS credentials not found. Please configure your credentials.")
-    else:
-        print(f"File {local_path} already exists. Skipping download.")
+        else:
+            logger.info(f"File {local_path} already exists. Skipping download.")
+    except NoCredentialsError:
+        logger.error("AWS credentials not found. Please configure your credentials.")
+    except ClientError as e:
+        logger.error(f"AWS Client Error downloading {s3_key}: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error downloading {s3_key}: {e}")
 
-def download_files(sample_names, assembler, s3_base_path, local_dir):
+def build_s3_path(base_path: str) -> str:
+    """Construct S3 path with nf_mag subfolder."""
+    parts = base_path.split('/')
+    bucket = parts[2]
+    prefix = '/'.join(parts[3:])
+    return f"s3://{bucket}/{CONFIG['nf_mag_subfolder']}/{prefix}"
+
+def download_files(sample_names: List[str], assembler: str, s3_base_path: str, local_dir: str) -> None:
     """Download contig files from S3 in parallel."""
     os.makedirs(local_dir, exist_ok=True)
     s3_bucket = s3_base_path.split('/')[2]
     s3_prefix = "/".join(s3_base_path.split('/')[3:])
     
     with ThreadPoolExecutor() as executor:
-        executor.map(lambda sample: download_file(s3_bucket, f"{s3_prefix}{assembler}-{sample}.contigs.fa.gz", 
-                                                 os.path.join(local_dir, f"{assembler}-{sample}.contigs.fa.gz")), sample_names)
+        executor.map(
+            lambda sample: download_file_from_s3(
+                s3_bucket,
+                f"{s3_prefix}{assembler}-{sample}.contigs.fa.gz",
+                os.path.join(local_dir, f"{assembler}-{sample}.contigs.fa.gz")
+            ),
+            sample_names
+        )
 
-def filter_sequences(sample_names, assembler, local_dir, min_length=1000):
-    """Filter sequences longer than min_length (default: 1000bp). [doi:10.1534/g3.118.200745]"""
+def filter_sequences(sample_names: List[str], assembler: str, local_dir: str, min_length: int) -> None:
+    """Filter sequences longer than min_length."""
     for sample in sample_names:
         input_file = os.path.join(local_dir, f"{assembler}-{sample}.contigs.fa.gz")
         output_file = os.path.join(local_dir, f"{assembler}-{sample}_filtered.fa")
         
-        print(f"Filtering {input_file} (keeping sequences > {min_length} bp)...")
-        subprocess.run(["seqkit", "seq", "-m", str(min_length), input_file, "-o", output_file])
+        logger.info(f"Filtering {input_file} (keeping sequences > {min_length} bp)")
+        subprocess.run(
+            ["seqkit", "seq", "-m", str(min_length), input_file, "-o", output_file],
+            check=True
+        )
 
-def merge_filtered_files(sample_names, assembly_dir, merged_dir):
-    """Merge filtered MEGAHIT and SPAdes contigs for each sample and compress the output."""
+def merge_filtered_files(sample_names: List[str], assembly_dir: str, merged_dir: str) -> None:
+    """Merge filtered MEGAHIT and SPAdes contigs for each sample."""
     os.makedirs(merged_dir, exist_ok=True)
     
     for sample in sample_names:
@@ -52,35 +116,30 @@ def merge_filtered_files(sample_names, assembly_dir, merged_dir):
         merged_file = os.path.join(merged_dir, f"{sample}_merged.fa.gz")
         
         if os.path.exists(megahit_file) and os.path.exists(spades_file):
-            print(f"Merging {megahit_file} and {spades_file} into {merged_file}...")
+            logger.info(f"Merging {megahit_file} and {spades_file} into {merged_file}")
             with gzip.open(merged_file, 'wb') as f_out:
                 for file in [megahit_file, spades_file]:
                     with open(file, 'rb') as f_in:
                         shutil.copyfileobj(f_in, f_out)
         else:
-            print(f"Warning: One or both files missing for {sample}, skipping merge.")
+            logger.warning(f"One or both files missing for {sample}, skipping merge.")
 
-def upload_to_s3(local_path, s3_bucket, s3_key):
-    """Upload the merged file to the specified S3 bucket and key."""
-    try:
-        print(f"Uploading {local_path} to s3://{s3_bucket}/{s3_key}")
-        s3_client.upload_file(local_path, s3_bucket, s3_key)
-    except NoCredentialsError:
-        print("AWS credentials not found. Please configure your credentials.")
-
-def generate_merged_filtered_contigs(samplesheet_path, min_length=1000):
-    """Wrapper function to download, filter, merge, compress, and upload contigs from metagenome assembly to S3, wich will be used as input to the funcscan pipeline"""
+def generate_merged_filtered_contigs(samplesheet_path: str, min_length: int) -> None:
+    """Process metagenome assembly contigs."""
+    logger.info("Starting assembly contigs processing")
+    
     df = pd.read_csv(samplesheet_path)
     sample_names = df["sample"].tolist()
     
     example_path = df["short_reads_1"].iloc[0]
     s3_root_path = "/".join(example_path.split("/")[:3]) + "/"
     
-    s3_megahit_path = f"{s3_root_path}Assembly/MEGAHIT/"
-    s3_spades_path = f"{s3_root_path}Assembly/SPAdes/"
-    s3_upload_path = f"{s3_root_path}Assembly/merged_results/"
+    # Build paths with nf_mag subfolder
+    s3_megahit_path = build_s3_path(f"{s3_root_path}Assembly/MEGAHIT/")
+    s3_spades_path = build_s3_path(f"{s3_root_path}Assembly/SPAdes/")
+    s3_upload_path = build_s3_path(f"{s3_root_path}Assembly/merged_results/")
     
-    assembly_dir = "./Assembly_results/"
+    assembly_dir = os.path.join(CONFIG["local_work_dir"], "Assembly_results")
     merged_dir = os.path.join(assembly_dir, "merged_results")
     
     # Download and filter
@@ -95,179 +154,195 @@ def generate_merged_filtered_contigs(samplesheet_path, min_length=1000):
     # Upload merged files to S3 in parallel
     s3_bucket = s3_root_path.split("/")[2]
     with ThreadPoolExecutor() as executor:
-        executor.map(lambda sample: upload_to_s3(os.path.join(merged_dir, f"{sample}_merged.fa.gz"), s3_bucket, f"Assembly/merged_results/{sample}_merged.fa.gz"), sample_names)
+        executor.map(
+            lambda sample: upload_to_s3(
+                os.path.join(merged_dir, f"{sample}_merged.fa.gz"),
+                s3_bucket,
+                f"{CONFIG['nf_mag_subfolder']}/Assembly/merged_results/{sample}_merged.fa.gz"
+            ),
+            sample_names
+        )
 
-# Run the process
-generate_merged_filtered_contigs("samplesheet.csv", min_length=1000)
+def filter_high_quality_bins(busco_file: str, quast_file: str, min_completeness: int, max_contamination: int) -> List[str]:
+    """Filter bins based on quality metrics."""
+    logger.info("Filtering high-quality bins based on BUSCO and QUAST results")
+    
+    busco_df = pd.read_csv(busco_file, sep="\t")
+    quast_df = pd.read_csv(quast_file, sep="\t")
 
-############################ DOWNLOAD, FILTER, MERGE, AND UPLOAD CONTIGS FROM FILTERED BINS FROM METAGENOME BINNING ######################################
+    busco_df.rename(columns={
+        "GenomeBin": "Bin",
+        "%Complete (specific)": "Completeness",
+        "%Missing (specific)": "Missing"
+    }, inplace=True)
+    quast_df.rename(columns={"Assembly": "Bin"}, inplace=True)
 
-def upload_to_s3(local_file_path, bucket_name, s3_file_path):
-    """Upload a file to S3."""
-    try:
-        s3_client.upload_file(local_file_path, bucket_name, s3_file_path)
-        print(f"Uploaded {local_file_path} to s3://{bucket_name}/{s3_file_path}")
-    except NoCredentialsError:
-        print("Credentials not available.")
-    except Exception as e:
-        print(f"Error uploading {local_file_path}: {e}")
+    if "Bin" not in busco_df.columns or "Bin" not in quast_df.columns:
+        raise KeyError("Could not find 'Bin' column in BUSCO or QUAST files")
 
-# Main processing function with configurable parameters
-def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min_length=1000):
-    """Function to download, filter, merge, and upload contigs from bins from metagenome binning to S3, wich will be used as input to the funcscan pipeline"""
-    df = pd.read_csv("samplesheet.csv")
+    merged_df = pd.merge(busco_df, quast_df, on="Bin", how="inner")
+
+    high_quality_bins = merged_df[
+        (merged_df["Completeness"] >= min_completeness) & 
+        (merged_df["Missing"] <= max_contamination)
+    ]
+
+    logger.info(f"Found {len(high_quality_bins)} high-quality bins")
+    
+    return [f"{bin_name}.gz" for bin_name in high_quality_bins["Bin"].tolist()]
+
+def process_bin_files(file_list: List[str], sample_names: List[str], s3_base_path_metabat: str,
+                     s3_base_path_maxbin: str, metabat_dir: str, maxbin_dir: str,
+                     merged_dir: str, min_length: int, s3_bucket: str) -> None:
+    """Process and merge bin files."""
+    merged_files = {sample: [] for sample in sample_names}
+
+    for file_name in file_list:
+        if 'MaxBin' in file_name:
+            target_subfolder = maxbin_dir
+            target_s3_folder = s3_base_path_maxbin
+        elif 'MetaBAT' in file_name:
+            target_subfolder = metabat_dir
+            target_s3_folder = s3_base_path_metabat
+        else:
+            logger.warning(f"Skipping unknown file type: {file_name}")
+            continue
+
+        os.makedirs(target_subfolder, exist_ok=True)
+        local_file_path = os.path.join(target_subfolder, file_name)
+        
+        if not os.path.exists(local_file_path):
+            s3_url = f"{target_s3_folder}{file_name}"
+            logger.info(f"Downloading {file_name} from {s3_url}")
+            download_file_from_s3(
+                s3_url.split('/')[2],
+                '/'.join(s3_url.split('/')[3:]),
+                local_file_path
+            )
+
+        filtered_file_path = local_file_path.replace(".fa.gz", "_filtered.fa")
+        logger.info(f"Filtering sequences in {local_file_path}")
+        subprocess.run(
+            ["seqkit", "seq", "-m", str(min_length), local_file_path, "-o", filtered_file_path],
+            check=True
+        )
+
+        for sample in sample_names:
+            if sample in file_name:
+                merged_files[sample].append(filtered_file_path)
+                break
+
+    os.makedirs(merged_dir, exist_ok=True)
+
+    for sample_id, file_paths in merged_files.items():
+        if file_paths:
+            merged_file_path = os.path.join(merged_dir, f"{sample_id}_merged.fa.gz")
+            
+            with gzip.open(merged_file_path, 'wb') as merged_file:
+                for file_path in file_paths:
+                    with open(file_path, 'rb') as f:
+                        shutil.copyfileobj(f, merged_file)
+
+            logger.info(f"Created merged file: {merged_file_path}")
+
+            upload_to_s3(
+                merged_file_path,
+                s3_bucket,
+                f"{CONFIG['nf_mag_subfolder']}/GenomeBinning/merged_results/{sample_id}_merged.fa.gz"
+            )
+
+def generate_merged_filtered_bins(min_completeness: int, max_contamination: int, min_length: int) -> None:
+    """Process metagenome binning results."""
+    logger.info("Starting bin processing")
+    
+    df = pd.read_csv(CONFIG["samplesheet_path"])
     sample_names = df["sample"].tolist()
-
-    # Extract S3 root path from the first short_reads_1 entry
     example_path = df["short_reads_1"].iloc[0]
     s3_root_path = "/".join(example_path.split("/")[:3]) + "/"
 
-    print(f"Detected S3 root path: {s3_root_path}")
-
-    # Define dynamic S3 paths
-    s3_base_path_metabat = f"{s3_root_path}GenomeBinning/MetaBAT2/bins/"
-    s3_base_path_maxbin = f"{s3_root_path}GenomeBinning/MaxBin2/bins/"
-    s3_base_path_qc = f"{s3_root_path}GenomeBinning/QC/"
+    # Build paths with nf_mag subfolder
+    s3_base_path_metabat = build_s3_path(f"{s3_root_path}GenomeBinning/MetaBAT2/bins/")
+    s3_base_path_maxbin = build_s3_path(f"{s3_root_path}GenomeBinning/MaxBin2/bins/")
+    s3_base_path_qc = build_s3_path(f"{s3_root_path}GenomeBinning/QC/")
     s3_bucket = s3_root_path.split('/')[2]
 
-    # Define output directories
-    binning_dir = "./Binning_results/"
+    binning_dir = os.path.join(CONFIG["local_work_dir"], "Binning_results")
     metabat_dir = os.path.join(binning_dir, "MetaBAT")
     maxbin_dir = os.path.join(binning_dir, "MaxBin")
     merged_dir = os.path.join(binning_dir, "merged_bins")
     qc_dir = os.path.join(binning_dir, "QC_reports")
 
-    # Ensure directories exist
     os.makedirs(metabat_dir, exist_ok=True)
     os.makedirs(maxbin_dir, exist_ok=True)
     os.makedirs(merged_dir, exist_ok=True)
     os.makedirs(qc_dir, exist_ok=True)
 
-    # Local paths for QC reports
     busco_file_local = os.path.join(qc_dir, "busco_summary.tsv")
     quast_file_local = os.path.join(qc_dir, "quast_summary.tsv")
 
-    # Download BUSCO & QUAST reports from S3 using boto3
-    def download_file_from_s3(s3_path, local_path):
-        try:
-            s3_client.download_file(s3_path.split('/')[2], '/'.join(s3_path.split('/')[3:]), local_path)
-            print(f"Downloaded {s3_path} to {local_path}")
-        except NoCredentialsError:
-            print("Credentials not available.")
-        except Exception as e:
-            print(f"Error downloading {s3_path}: {e}")
+    logger.info("Downloading QC reports")
+    download_file_from_s3(
+        s3_base_path_qc.split('/')[2],
+        f"{CONFIG['nf_mag_subfolder']}/GenomeBinning/QC/busco_summary.tsv",
+        busco_file_local
+    )
+    download_file_from_s3(
+        s3_base_path_qc.split('/')[2],
+        f"{CONFIG['nf_mag_subfolder']}/GenomeBinning/QC/quast_summary.tsv",
+        quast_file_local
+    )
 
-    print("Downloading BUSCO and QUAST reports from S3...")
-    download_file_from_s3(f"{s3_base_path_qc}busco_summary.tsv", busco_file_local)
-    download_file_from_s3(f"{s3_base_path_qc}quast_summary.tsv", quast_file_local)
+    high_quality_bins = filter_high_quality_bins(
+        busco_file_local,
+        quast_file_local,
+        min_completeness,
+        max_contamination
+    )
 
-    def filter_high_quality_bins(busco_file, quast_file, min_completeness, max_contamination):
-        """Filter bins based on BUSCO completeness and QUAST contamination. By default, min_completeness=50, max_contamination=10, and min_length=1000 [doi:10.1534/g3.118.200745]"""
-        print("\nFiltering high-quality bins based on BUSCO and QUAST results...")
+    process_bin_files(
+        high_quality_bins,
+        sample_names,
+        s3_base_path_metabat,
+        s3_base_path_maxbin,
+        metabat_dir,
+        maxbin_dir,
+        merged_dir,
+        min_length,
+        s3_bucket
+    )
 
-        busco_df = pd.read_csv(busco_file, sep="\t")
-        quast_df = pd.read_csv(quast_file, sep="\t")
+def cleanup(local_dirs_to_remove: List[str]) -> None:
+    """Remove local directories after processing."""
+    for dir_path in local_dirs_to_remove:
+        if os.path.exists(dir_path):
+            shutil.rmtree(dir_path)
+            logger.info(f"Removed local directory: {dir_path}")
 
-        busco_df.rename(columns={"GenomeBin": "Bin", "%Complete (specific)": "Completeness", "%Missing (specific)": "Missing"}, inplace=True)
-        quast_df.rename(columns={"Assembly": "Bin"}, inplace=True)
-
-        if "Bin" not in busco_df.columns or "Bin" not in quast_df.columns:
-            raise KeyError("Could not find a 'Bin' column in one of the files.")
-
-        merged_df = pd.merge(busco_df, quast_df, on="Bin", how="inner")
-
-        high_quality_bins = merged_df[
-            (merged_df["Completeness"] >= min_completeness) & 
-            (merged_df["Missing"] <= max_contamination)
-        ]
-
-        print(f"High-quality bins found: {len(high_quality_bins)}")
+def main() -> None:
+    """Main execution function."""
+    try:
+        # Process assembly contigs
+        generate_merged_filtered_contigs(
+            CONFIG["samplesheet_path"],
+            CONFIG["min_contig_length"]
+        )
         
-        # Modify the bin names to reflect the .fa.gz extension
-        high_quality_bins_list = high_quality_bins["Bin"].tolist()
-        high_quality_bins_gz = [f"{bin_name}.gz" for bin_name in high_quality_bins_list]
+        # Process binned contigs
+        generate_merged_filtered_bins(
+            min_completeness=CONFIG["min_bin_completeness"],
+            max_contamination=CONFIG["max_bin_contamination"],
+            min_length=CONFIG["min_contig_length"]
+        )
         
-        return high_quality_bins_gz
+        # Cleanup (optional - comment out if you want to keep intermediate files)
+        # cleanup([
+        #     os.path.join(CONFIG["local_work_dir"], "Assembly_results"),
+        #     os.path.join(CONFIG["local_work_dir"], "Binning_results")
+        # ])
+        
+    except Exception as e:
+        logger.error(f"Script failed: {e}", exc_info=True)
+        raise
 
-    # Get high-quality bins with .fa.gz extension
-    high_quality_bins = filter_high_quality_bins(busco_file_local, quast_file_local, min_completeness, max_contamination)
-
-    # Function to filter sequences with seqkit
-    def filter_sequences_with_seqkit(input_file, output_file, min_length):
-        """Filter sequences based on minimum length using seqkit."""
-        print(f"Filtering sequences in {input_file} with seqkit (min length: {min_length})...")
-        subprocess.run(["seqkit", "seq", "-m", str(min_length), input_file, "-o", output_file])
-
-    # Function to download, filter, save, and merge files using boto3
-    def save_and_merge_files(file_list):
-        merged_files = {sample: [] for sample in sample_names}  # Initialize empty lists for each sample
-
-        for file_name in file_list:
-            # Define the target subfolder based on file type
-            if 'MaxBin' in file_name:
-                target_subfolder = maxbin_dir
-                target_s3_folder = s3_base_path_maxbin
-            elif 'MetaBAT' in file_name:
-                target_subfolder = metabat_dir
-                target_s3_folder = s3_base_path_metabat
-            else:
-                print(f"Skipping unknown file type: {file_name}")
-                continue
-
-            # Ensure target folder exists (subfolder for MetaBAT or MaxBin)
-            os.makedirs(target_subfolder, exist_ok=True)
-
-            # Download file from S3 using boto3
-            local_file_path = os.path.join(target_subfolder, file_name)
-            if not os.path.exists(local_file_path):
-                s3_url = f"{target_s3_folder}{file_name}"
-                print(f"Downloading {file_name} from {s3_url}")
-                try:
-                    download_file_from_s3(s3_url, local_file_path)
-                except Exception as e:
-                    print(f"Error downloading {file_name}: {e}")
-                    continue
-
-            # Filter sequences using seqkit before merging
-            filtered_file_path = local_file_path.replace(".fa.gz", "_filtered.fa.gz")
-            filter_sequences_with_seqkit(local_file_path, filtered_file_path, min_length)
-
-            # Extract the sample ID based on the file name
-            for sample in sample_names:
-                if sample in file_name:
-                    # Add the filtered file to the list of merged files for this sample
-                    merged_files[sample].append(filtered_file_path)
-                    break
-
-        # Merge files for each sample and save them in the merged_results folder
-        os.makedirs(merged_dir, exist_ok=True)
-
-        for sample_id, file_paths in merged_files.items():
-            # Only merge files if there are any for this sample
-            if file_paths:
-                merged_file_path = os.path.join(merged_dir, f"{sample_id}_merged.fa.gz")
-                
-                with open(merged_file_path, 'wb') as merged_file:
-                    for file_path in file_paths:
-                        with open(file_path, 'rb') as f:
-                            shutil.copyfileobj(f, merged_file)  # Merge files
-
-                print(f"Merged file saved: {merged_file_path}")
-
-                # Upload the merged file to S3
-                s3_bucket = s3_root_path.split("/")[2]
-                s3_file_path = f"GenomeBinning/merged_results/{sample_id}_merged.fa.gz"
-                upload_to_s3(merged_file_path, s3_bucket, s3_file_path)
-
-    # Run the function to save, merge files and upload to S3
-    save_and_merge_files(high_quality_bins)
-
-    # Parallel upload of all merged files to S3 using ThreadPoolExecutor
-    with ThreadPoolExecutor() as executor:
-        for sample in sample_names:
-            merged_file_path = os.path.join(merged_dir, f"{sample}_merged.fa.gz")
-            if os.path.exists(merged_file_path):  # Only upload if file exists
-                s3_file_path = f"GenomeBinning/merged_results/{sample}_merged.fa.gz"
-                executor.submit(upload_to_s3, merged_file_path, s3_bucket, s3_file_path)
-
-generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min_length=1000)
+if __name__ == "__main__":
+    main()
