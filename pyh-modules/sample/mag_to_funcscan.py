@@ -107,7 +107,7 @@ def filter_sequences(sample_names: List[str], assembler: str, local_dir: str, mi
         )
 
 def merge_filtered_files(sample_names: List[str], assembly_dir: str, merged_dir: str) -> None:
-    """Merge filtered MEGAHIT and SPAdes contigs for each sample."""
+    """Merge filtered MEGAHIT and SPAdes contigs for each sample with unique sequence names."""
     os.makedirs(merged_dir, exist_ok=True)
     
     for sample in sample_names:
@@ -117,10 +117,25 @@ def merge_filtered_files(sample_names: List[str], assembly_dir: str, merged_dir:
         
         if os.path.exists(megahit_file) and os.path.exists(spades_file):
             logger.info(f"Merging {megahit_file} and {spades_file} into {merged_file}")
-            with gzip.open(merged_file, 'wb') as f_out:
-                for file in [megahit_file, spades_file]:
-                    with open(file, 'rb') as f_in:
-                        shutil.copyfileobj(f_in, f_out)
+            
+            with gzip.open(merged_file, 'wt') as f_out:
+                # Process MEGAHIT file
+                with open(megahit_file, 'r') as f_in:
+                    for line in f_in:
+                        if line.startswith('>'):
+                            # Add MEGAHIT prefix to sequence names
+                            f_out.write(f">{sample}_MEGAHIT_{line[1:]}")
+                        else:
+                            f_out.write(line)
+                
+                # Process SPAdes file
+                with open(spades_file, 'r') as f_in:
+                    for line in f_in:
+                        if line.startswith('>'):
+                            # Add SPAdes prefix to sequence names
+                            f_out.write(f">{sample}_SPAdes_{line[1:]}")
+                        else:
+                            f_out.write(line)
         else:
             logger.warning(f"One or both files missing for {sample}, skipping merge.")
 
@@ -194,16 +209,18 @@ def filter_high_quality_bins(busco_file: str, quast_file: str, min_completeness:
 def process_bin_files(file_list: List[str], sample_names: List[str], s3_base_path_metabat: str,
                      s3_base_path_maxbin: str, metabat_dir: str, maxbin_dir: str,
                      merged_dir: str, min_length: int, s3_bucket: str) -> None:
-    """Process and merge bin files."""
+    """Process and merge bin files with unique sequence names."""
     merged_files = {sample: [] for sample in sample_names}
 
     for file_name in file_list:
         if 'MaxBin' in file_name:
             target_subfolder = maxbin_dir
             target_s3_folder = s3_base_path_maxbin
+            bin_type = "MaxBin"
         elif 'MetaBAT' in file_name:
             target_subfolder = metabat_dir
             target_s3_folder = s3_base_path_metabat
+            bin_type = "MetaBAT"
         else:
             logger.warning(f"Skipping unknown file type: {file_name}")
             continue
@@ -229,19 +246,24 @@ def process_bin_files(file_list: List[str], sample_names: List[str], s3_base_pat
 
         for sample in sample_names:
             if sample in file_name:
-                merged_files[sample].append(filtered_file_path)
+                merged_files[sample].append((filtered_file_path, bin_type))
                 break
 
     os.makedirs(merged_dir, exist_ok=True)
 
-    for sample_id, file_paths in merged_files.items():
-        if file_paths:
+    for sample_id, file_info in merged_files.items():
+        if file_info:
             merged_file_path = os.path.join(merged_dir, f"{sample_id}_merged.fa.gz")
             
-            with gzip.open(merged_file_path, 'wb') as merged_file:
-                for file_path in file_paths:
-                    with open(file_path, 'rb') as f:
-                        shutil.copyfileobj(f, merged_file)
+            with gzip.open(merged_file_path, 'wt') as merged_file:
+                for file_path, bin_type in file_info:
+                    with open(file_path, 'r') as f:
+                        for line in f:
+                            if line.startswith('>'):
+                                # Add bin type prefix to sequence names
+                                merged_file.write(f">{sample_id}_{bin_type}_{line[1:]}")
+                            else:
+                                merged_file.write(line)
 
             logger.info(f"Created merged file: {merged_file_path}")
 
