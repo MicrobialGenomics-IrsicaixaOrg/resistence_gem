@@ -121,9 +121,12 @@ Alternatively, you can use the library programmatically:
     processor = MAGProcessor()
 
     # Or, using a custom configuration
-    custom_config = {
-        "min_contig_length": 1500,
-        "samplesheet_path": "data/my_samples.csv"
+        custom_config = {
+        "samplesheet_path": "/home/user/Documents/data/samplesheet.csv",
+        "local_work_dir": "/home/user/Documents/data/results"
+    }
+        "samplesheet_path": "/home/user/Documents/data/samplesheet.csv",
+        "local_work_dir": "/home/user/Documents/data/results"
     }
     processor = MAGProcessor(config=custom_config)
 
@@ -136,19 +139,24 @@ File Structure
 .. code-block:: text
 
     resistence_gem/
-    ├── pyh-modules/
-    │   ├── docs/                     # Documentation (Sphinx)
-    │   ├── sample/                   # Library code
-    │   │   ├── __init__.py           # Package initialization
-    │   │   ├── constants.py          # Default configuration values
-    │   │   ├── core.py               # Main processing logic
-    │   │   ├── helpers.py            # AWS S3 utilities
-    │   │   └── exceptions.py         # Custom exceptions
-    │   ├── tests/                    # Unit and integration tests
-    │   ├── samplesheet.csv           # Example samplesheet (optional)
-    │   ├── requirements.txt          # Package dependencies
-    │   └── setup.py                  # Package setup script
+    ├── pyh-modules/                  # Root directory of the package
+    ├── docs/                       # Documentation files (Sphinx configuration and index)
+    │   ├── conf.py                 # Sphinx configuration file
+    │   └── index.rst               # Main documentation index
+    ├── README.rst                  # Project README with installation, configuration, and usage instructions
+    ├── requirements.txt            # List of Python package dependencies
+    ├── sample/                     # Main package code
+    │   ├── constants.py            # Default configuration settings
+    │   ├── core.py                 # Core processing logic (e.g., downloads, filtering, merging, uploads)
+    │   ├── helpers.py              # Helper functions (e.g., S3 operations)
+    │   ├── __init__.py             # Package initialization file (exports package components)
+    ├── setup.py                    # Setup script for packaging and installation
+    └── tests/                      # Test suite for unit and integration tests
+        ├── conftest.py             # Pytest configuration and fixtures
+        ├── test_advanced.py        # Advanced integration tests
+        └── test_basic.py           # Basic unit tests
 
+        
 Testing
 -------
 Run tests using pytest. From the repository root, execute:

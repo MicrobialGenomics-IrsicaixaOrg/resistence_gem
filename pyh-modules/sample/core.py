@@ -7,9 +7,18 @@ from concurrent.futures import ThreadPoolExecutor
 import boto3
 from botocore.exceptions import NoCredentialsError
 from .helpers import download_file, upload_file_to_s3
+from .constants import DEFAULT_CONFIG
 
 # Initialize S3 client
 s3_client = boto3.client("s3")
+
+def build_s3_path(base_path: str) -> str:
+    """Construct S3 path with nf_mag subfolder."""
+    parts = base_path.split('/')
+    bucket = parts[2]
+    prefix = '/'.join(parts[3:])
+    return f"s3://{bucket}/{DEFAULT_CONFIG['nf_mag_subfolder']}/{prefix}"
+
 
 def download_files(sample_names, assembler, s3_base_path, local_dir):
     """
@@ -55,19 +64,21 @@ def merge_filtered_files(sample_names, assembly_dir, merged_dir):
         else:
             print(f"Warning: One or both files missing for {sample}, skipping merge.")
 
-def generate_merged_filtered_contigs(samplesheet_path, min_length=1000):
+def generate_merged_filtered_contigs(samplesheet_path, min_length=1000, config=DEFAULT_CONFIG):
     """
     Process contigs: download, filter, merge and upload.
     """
+    samplesheet_path = config.get("samplesheet_path", "samplesheet.csv")
     df = pd.read_csv(samplesheet_path)
     sample_names = df["sample"].tolist()
     example_path = df["short_reads_1"].iloc[0]
     s3_root_path = "/".join(example_path.split("/")[:3]) + "/"
     
-    s3_megahit_path = f"{s3_root_path}Assembly/MEGAHIT/"
-    s3_spades_path = f"{s3_root_path}Assembly/SPAdes/"
+    s3_megahit_path = build_s3_path(f"{s3_root_path}Assembly/MEGAHIT/")
+    s3_spades_path  = build_s3_path(f"{s3_root_path}Assembly/SPAdes/")
     
-    assembly_dir = os.path.join(os.getcwd(), "Assembly_results")
+    local_work_dir = config.get("local_work_dir", os.getcwd())
+    assembly_dir = os.path.join(local_work_dir, "Assembly_results")
     merged_dir = os.path.join(assembly_dir, "merged_results")
     
     # Download files for both assemblers
@@ -84,30 +95,32 @@ def generate_merged_filtered_contigs(samplesheet_path, min_length=1000):
     # Upload merged files to S3
     s3_bucket = s3_root_path.split("/")[2]
     
-    def upload(sample):
-        local_file = os.path.join(merged_dir, f"{sample}_merged.fa.gz")
-        s3_key = f"Assembly/merged_results/{sample}_merged.fa.gz"
-        upload_file_to_s3(local_file, s3_bucket, s3_key)
+def upload(sample):
+    local_file = os.path.join(merged_dir, f"{sample}_merged.fa.gz")
+    s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/Assembly/merged_results/{sample}_merged.fa.gz"
+    upload_file_to_s3(local_file, s3_bucket, s3_key)
     
     with ThreadPoolExecutor() as executor:
         executor.map(upload, sample_names)
 
-def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min_length=1000):
+def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min_length=1000, config=DEFAULT_CONFIG):
     """
     Process bins: download QC reports, filter bins, download and merge bin files, then upload merged bins.
     """
-    df = pd.read_csv("samplesheet.csv")
+    samplesheet_path = config.get("samplesheet_path", "samplesheet.csv")
+    df = pd.read_csv(samplesheet_path)
     sample_names = df["sample"].tolist()
     example_path = df["short_reads_1"].iloc[0]
     s3_root_path = "/".join(example_path.split("/")[:3]) + "/"
     
-    s3_base_path_metabat = f"{s3_root_path}GenomeBinning/MetaBAT2/bins/"
-    s3_base_path_maxbin = f"{s3_root_path}GenomeBinning/MaxBin2/bins/"
-    s3_base_path_qc = f"{s3_root_path}GenomeBinning/QC/"
+    s3_base_path_metabat = build_s3_path(f"{s3_root_path}GenomeBinning/MetaBAT2/bins/")
+    s3_base_path_maxbin = build_s3_path(f"{s3_root_path}GenomeBinning/MaxBin2/bins/")
+    s3_base_path_qc = build_s3_path(f"{s3_root_path}GenomeBinning/QC/")
     s3_bucket = s3_root_path.split('/')[2]
     
     # Define local directories
-    binning_dir = os.path.join(os.getcwd(), "Binning_results")
+    local_work_dir = config.get("local_work_dir", os.getcwd())
+    binning_dir = os.path.join(local_work_dir, "Binning_results")
     metabat_dir = os.path.join(binning_dir, "MetaBAT")
     maxbin_dir = os.path.join(binning_dir, "MaxBin")
     merged_dir = os.path.join(binning_dir, "merged_bins")
@@ -199,7 +212,7 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
                     with open(f, 'rb') as fd:
                         shutil.copyfileobj(fd, wfd)
             print(f"Merged bin file saved: {merged_file_path}")
-            s3_key = f"GenomeBinning/merged_results/{sample}_merged.fa.gz"
+            s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/GenomeBinning/merged_results/{sample}_merged.fa.gz"
             upload_file_to_s3(merged_file_path, s3_bucket, s3_key)
     
     # Optionally, parallel upload if needed
@@ -207,8 +220,8 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
         for sample in sample_names:
             merged_file_path = os.path.join(merged_dir, f"{sample}_merged.fa.gz")
             if os.path.exists(merged_file_path):
-                s3_key = f"GenomeBinning/merged_results/{sample}_merged.fa.gz"
-                executor.submit(upload_file_to_s3, merged_file_path, s3_bucket, s3_key)
+                s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/GenomeBinning/merged_results/{sample}_merged.fa.gz"
+                upload_file_to_s3(merged_file_path, s3_bucket, s3_key)
 
 def main():
     """
@@ -244,4 +257,34 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+class MAGProcessor:
+    def __init__(self, config=None):
+        # Merge the provided config with the default configuration.
+        self.config = DEFAULT_CONFIG.copy()
+        if config:
+            self.config.update(config)
+
+    def process_assemblies(self):
+        """
+        Process assembly contigs: download, filter, merge, and upload.
+        """
+        from .core import generate_merged_filtered_contigs
+        generate_merged_filtered_contigs(
+            self.config["samplesheet_path"],
+            min_length=self.config.get("min_contig_length", 1000),
+            config=self.config
+        )
+
+    def process_bins(self):
+        """
+        Process bins: download, filter, merge, and upload.
+        """
+        from .core import generate_merged_filtered_bins
+        generate_merged_filtered_bins(
+            min_completeness=self.config.get("min_bin_completeness", 50),
+            max_contamination=self.config.get("max_bin_contamination", 10),
+            min_length=self.config.get("min_contig_length", 1000),
+            config=self.config
+        )
 
