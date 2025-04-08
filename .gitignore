@@ -49,8 +49,5 @@ docs/_build/
 .DS_Store
 Thumbs.db
 
-# Local user files (if not intended for version control)
-home/ocareta/
-
 # Specific egg-info folder inside the sample directory
 sample/pyh_modules.egg-info/
