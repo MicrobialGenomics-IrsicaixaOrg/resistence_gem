@@ -115,6 +115,8 @@ Alternatively, you can use the library programmatically:
 
 .. code-block:: python
 
+    python3
+    
     from sample import MAGProcessor
 
     # Using default configuration
@@ -125,9 +127,7 @@ Alternatively, you can use the library programmatically:
         "samplesheet_path": "/home/user/Documents/data/samplesheet.csv",
         "local_work_dir": "/home/user/Documents/data/results"
     }
-        "samplesheet_path": "/home/user/Documents/data/samplesheet.csv",
-        "local_work_dir": "/home/user/Documents/data/results"
-    }
+ 
     processor = MAGProcessor(config=custom_config)
 
     # Run the pipeline
