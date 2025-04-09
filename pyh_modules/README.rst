@@ -1,4 +1,4 @@
-pyh-modules
+pyh_modules
 ===========
 
 A Python library for processing metagenomic assembly and binning results from S3.
@@ -16,7 +16,7 @@ Installation
 
     # Clone the repository
     git clone https://github.com/MicrobialGenomics-IrsicaixaOrg/resistence_gem.git
-    cd resistence_gem/pyh-modules
+    cd resistence_gem/pyh_modules
 
     # Create and activate a virtual environment (recommended)
     python -m venv venv
@@ -26,6 +26,10 @@ Installation
 
     # Install the package in editable (development) mode
     pip install -e .
+    
+
+**Note:** Ensure that **seqkit** is installed and available on your system's PATH. Check out the installation instructions at:
+https://bioinf.shenwei.me/seqkit/usage/
 
 Configuration
 -------------
@@ -117,7 +121,7 @@ Alternatively, you can use the library programmatically:
 
     python3
     
-    from sample import MAGProcessor
+    from pyh_modules import MAGProcessor
 
     # Using default configuration
     processor = MAGProcessor()
@@ -139,13 +143,13 @@ File Structure
 .. code-block:: text
 
     resistence_gem/
-    ├── pyh-modules/                  # Root directory of the package
+    ├── pyh_modules/                  # Root directory of the package
     ├── docs/                       # Documentation files (Sphinx configuration and index)
     │   ├── conf.py                 # Sphinx configuration file
     │   └── index.rst               # Main documentation index
     ├── README.rst                  # Project README with installation, configuration, and usage instructions
     ├── requirements.txt            # List of Python package dependencies
-    ├── sample/                     # Main package code
+    ├── pyh_modules/                     # Main package code
     │   ├── constants.py            # Default configuration settings
     │   ├── core.py                 # Core processing logic (e.g., downloads, filtering, merging, uploads)
     │   ├── helpers.py              # Helper functions (e.g., S3 operations)

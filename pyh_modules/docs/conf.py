@@ -2,11 +2,12 @@
 
 import os
 import sys
-sys.path.insert(0, os.path.abspath('../sample'))
+# Updated sys.path to point to the renamed package directory "pyh_modules"
+sys.path.insert(0, os.path.abspath('../pyh_modules'))
 
-project = 'PyH Modules'
-copyright = '2025, Your Name'
-author = 'Your Name'
+project = 'resistance'
+copyright = '2025, Oriol Careta'
+author = 'Oriol Careta'
 
 release = '0.1.0'
 

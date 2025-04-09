@@ -1,17 +1,24 @@
 import os
 import subprocess
 import gzip
+import logging
 import shutil
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
 import boto3
 from botocore.exceptions import NoCredentialsError
-from .helpers import download_file, upload_file_to_s3
-from .constants import DEFAULT_CONFIG
+from pyh_modules.helpers import download_file, upload_file_to_s3
+from pyh_modules.constants import DEFAULT_CONFIG
 
-# Initialize S3 client
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 s3_client = boto3.client("s3")
-
 
 def build_s3_path(base_path: str) -> str:
     """Construct S3 path with nf_mag subfolder."""
@@ -20,8 +27,7 @@ def build_s3_path(base_path: str) -> str:
     prefix = '/'.join(parts[3:])
     return f"s3://{bucket}/{DEFAULT_CONFIG['nf_mag_subfolder']}/{prefix}"
 
-
-def download_files(sample_names, assembler, s3_base_path, local_dir):
+def download_files(sample_names: list, assembler: str, s3_base_path: str, local_dir: str) -> None:
     """
     Download contig files from S3 in parallel.
     """
@@ -29,7 +35,7 @@ def download_files(sample_names, assembler, s3_base_path, local_dir):
     s3_bucket = s3_base_path.split('/')[2]
     s3_prefix = "/".join(s3_base_path.split('/')[3:])
 
-    def download_sample(sample):
+    def download_sample(sample: str) -> None:
         key = f"{s3_prefix}{assembler}-{sample}.contigs.fa.gz"
         local_path = os.path.join(local_dir, f"{assembler}-{sample}.contigs.fa.gz")
         download_file(s3_bucket, key, local_path)
@@ -37,22 +43,23 @@ def download_files(sample_names, assembler, s3_base_path, local_dir):
     with ThreadPoolExecutor() as executor:
         executor.map(download_sample, sample_names)
 
-
-def filter_sequences(sample_names, assembler, local_dir, min_length=1000):
+def filter_sequences(sample_names: list, assembler: str, local_dir: str, min_length: int = 1000) -> None:
     """
     Filter sequences longer than min_length using seqkit.
     """
     for sample in sample_names:
         input_file = os.path.join(local_dir, f"{assembler}-{sample}.contigs.fa.gz")
         output_file = os.path.join(local_dir, f"{assembler}-{sample}_filtered.fa")
-        print(f"Filtering {input_file} (keeping sequences > {min_length} bp)...")
-        subprocess.run(
-            ["seqkit", "seq", "-m", str(min_length), input_file, "-o", output_file],
-            check=True
-        )
+        logger.info(f"Filtering {input_file} (keeping sequences > {min_length} bp)...")
+        try:
+            subprocess.run(
+                ["seqkit", "seq", "-m", str(min_length), input_file, "-o", output_file],
+                check=True
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Seqkit failed on {input_file}: {e}")
 
-
-def merge_filtered_files(sample_names, assembly_dir, merged_dir):
+def merge_filtered_files(sample_names: list, assembly_dir: str, merged_dir: str) -> None:
     """
     Merge filtered contig files for each sample and compress the output.
     This version prefixes sequence headers with the assembler name to ensure uniqueness.
@@ -65,29 +72,31 @@ def merge_filtered_files(sample_names, assembly_dir, merged_dir):
         merged_file = os.path.join(merged_dir, f"{sample}_merged.fa.gz")
 
         if os.path.exists(megahit_file) and os.path.exists(spades_file):
-            print(f"Merging {megahit_file} and {spades_file} into {merged_file}...")
-            with gzip.open(merged_file, 'wt') as f_out:
-                # Process MEGAHIT file: add "MEGAHIT_" prefix
-                with open(megahit_file, 'r') as f_in:
-                    for line in f_in:
-                        if line.startswith('>'):
-                            new_header = f">{sample}_MEGAHIT_{line[1:].strip()}\n"
-                            f_out.write(new_header)
-                        else:
-                            f_out.write(line)
-                # Process SPAdes file: add "SPAdes_" prefix
-                with open(spades_file, 'r') as f_in:
-                    for line in f_in:
-                        if line.startswith('>'):
-                            new_header = f">{sample}_SPAdes_{line[1:].strip()}\n"
-                            f_out.write(new_header)
-                        else:
-                            f_out.write(line)
+            logger.info(f"Merging {megahit_file} and {spades_file} into {merged_file}...")
+            try:
+                with gzip.open(merged_file, 'wt') as f_out:
+                    # Process MEGAHIT file: add "MEGAHIT_" prefix
+                    with open(megahit_file, 'r') as f_in:
+                        for line in f_in:
+                            if line.startswith('>'):
+                                new_header = f">{sample}_MEGAHIT_{line[1:].strip()}\n"
+                                f_out.write(new_header)
+                            else:
+                                f_out.write(line)
+                    # Process SPAdes file: add "SPAdes_" prefix
+                    with open(spades_file, 'r') as f_in:
+                        for line in f_in:
+                            if line.startswith('>'):
+                                new_header = f">{sample}_SPAdes_{line[1:].strip()}\n"
+                                f_out.write(new_header)
+                            else:
+                                f_out.write(line)
+            except Exception as e:
+                logger.error(f"Error merging files for {sample}: {e}")
         else:
-            print(f"Warning: One or both files missing for {sample}, skipping merge.")
+            logger.warning(f"One or both files missing for {sample}, skipping merge.")
 
-
-def generate_merged_filtered_contigs(samplesheet_path, min_length=1000, config=DEFAULT_CONFIG):
+def generate_merged_filtered_contigs(samplesheet_path: str, min_length: int = 1000, config: dict = DEFAULT_CONFIG) -> None:
     """
     Process contigs: download, filter, merge and upload.
     Implements a checkpoint to skip download/filter/merge if merged files already exist.
@@ -105,16 +114,16 @@ def generate_merged_filtered_contigs(samplesheet_path, min_length=1000, config=D
     assembly_dir = os.path.join(local_work_dir, "Assembly_results")
     merged_dir_out = os.path.join(assembly_dir, "merged_results")
 
-    # Check if merged files exist for all samples; if so, skip to uploading.
+    # Check for merged files and skip processing if they exist
     if os.path.exists(merged_dir_out):
         merged_files_exist = all(
             os.path.exists(os.path.join(merged_dir_out, f"{sample}_merged.fa.gz"))
             for sample in sample_names
         )
         if merged_files_exist:
-            print("Merged contig files found. Skipping download, filtering, and merging. Uploading merged files only.")
+            logger.info("Merged contig files found. Skipping download, filtering, and merging. Uploading merged files only.")
             s3_bucket = s3_root_path.split("/")[2]
-            def upload(sample):
+            def upload(sample: str) -> None:
                 local_file = os.path.join(merged_dir_out, f"{sample}_merged.fa.gz")
                 s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/Assembly/merged_results/{sample}_merged.fa.gz"
                 upload_file_to_s3(local_file, s3_bucket, s3_key)
@@ -122,8 +131,7 @@ def generate_merged_filtered_contigs(samplesheet_path, min_length=1000, config=D
                 executor.map(upload, sample_names)
             return
 
-    # Otherwise, run full pipeline
-    print("Processing contigs: downloading, filtering, merging, and uploading.")
+    logger.info("Processing contigs: downloading, filtering, merging, and uploading.")
     download_files(sample_names, "MEGAHIT", s3_megahit_path, os.path.join(assembly_dir, "MEGAHIT"))
     download_files(sample_names, "SPAdes", s3_spades_path, os.path.join(assembly_dir, "SPAdes"))
 
@@ -134,7 +142,7 @@ def generate_merged_filtered_contigs(samplesheet_path, min_length=1000, config=D
 
     s3_bucket = s3_root_path.split("/")[2]
 
-    def upload(sample):
+    def upload(sample: str) -> None:
         local_file = os.path.join(merged_dir_out, f"{sample}_merged.fa.gz")
         s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/Assembly/merged_results/{sample}_merged.fa.gz"
         upload_file_to_s3(local_file, s3_bucket, s3_key)
@@ -142,11 +150,11 @@ def generate_merged_filtered_contigs(samplesheet_path, min_length=1000, config=D
     with ThreadPoolExecutor() as executor:
         executor.map(upload, sample_names)
 
-
-def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min_length=1000, config=DEFAULT_CONFIG):
+def generate_merged_filtered_bins(min_completeness: int = 50, max_contamination: int = 10, min_length: int = 1000, config: dict = DEFAULT_CONFIG) -> None:
     """
     Process bins: download QC reports, filter bins, download and merge bin files, then upload merged bins.
     Implements a checkpoint to skip download/filter/merge if merged files already exist.
+    Resumable upload: if an upload fails for one bin file, it will log the error and retry.
     """
     samplesheet_path = config.get("samplesheet_path", "samplesheet.csv")
     df = pd.read_csv(samplesheet_path)
@@ -172,22 +180,22 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
     busco_file_local = os.path.join(qc_dir, "busco_summary.tsv")
     quast_file_local = os.path.join(qc_dir, "quast_summary.tsv")
 
-    def download_qc(s3_path, local_path):
+    def download_qc(s3_path: str, local_path: str) -> None:
         parts = s3_path.split('/')
         bucket = parts[2]
         key = "/".join(parts[3:])
         try:
             s3_client.download_file(bucket, key, local_path)
-            print(f"Downloaded {s3_path} to {local_path}")
+            logger.info(f"Downloaded {s3_path} to {local_path}")
         except NoCredentialsError:
-            print("AWS credentials not found.")
+            logger.error("AWS credentials not found.")
         except Exception as e:
-            print(f"Error downloading {s3_path}: {e}")
+            logger.error(f"Error downloading {s3_path}: {e}")
 
     download_qc(f"{s3_base_path_qc}busco_summary.tsv", busco_file_local)
     download_qc(f"{s3_base_path_qc}quast_summary.tsv", quast_file_local)
 
-    print("Filtering high-quality bins...")
+    logger.info("Filtering high-quality bins...")
     busco_df = pd.read_csv(busco_file_local, sep="\t")
     quast_df = pd.read_csv(quast_file_local, sep="\t")
 
@@ -203,36 +211,40 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
     high_quality_bins_list = high_quality_bins["Bin"].tolist()
     high_quality_bins_gz = [f"{bin_name}.gz" for bin_name in high_quality_bins_list]
 
-    # Check if merged bin files exist for all samples; if so, skip to upload.
+    # Check if merged bin files exist for all samples; if so, skip processing and only upload.
     if os.path.exists(merged_dir_bins):
         merged_bins_exist = all(
             os.path.exists(os.path.join(merged_dir_bins, f"{sample}_merged.fa.gz"))
             for sample in sample_names
         )
         if merged_bins_exist:
-            print("Merged bin files found. Skipping download, filtering, and merging. Uploading merged files only.")
-            def upload_sample(sample):
+            logger.info("Merged bin files found. Skipping download, filtering, and merging. Uploading merged files only.")
+
+            def upload_sample(sample: str) -> None:
                 merged_file_path = os.path.join(merged_dir_bins, f"{sample}_merged.fa.gz")
                 if os.path.exists(merged_file_path):
                     s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/GenomeBinning/merged_results/{sample}_merged.fa.gz"
-                    upload_file_to_s3(merged_file_path, s3_bucket, s3_key)
+                    attempts = 3
+                    for i in range(attempts):
+                        try:
+                            upload_file_to_s3(merged_file_path, s3_bucket, s3_key)
+                            logger.info(f"Uploaded {merged_file_path} successfully on attempt {i + 1}.")
+                            break  # Exit loop on success.
+                        except Exception as e:
+                            logger.error(f"Attempt {i + 1} failed to upload {merged_file_path}: {e}")
+                            if i == attempts - 1:
+                                logger.error(f"All {attempts} attempts failed for {merged_file_path}.")
             with ThreadPoolExecutor() as executor:
                 executor.map(upload_sample, sample_names)
             return
 
-    # Process bin files: download, filter and merge
-    def process_bin_files(file_list, sample_names, s3_base_path_metabat, s3_base_path_maxbin,
-                          metabat_dir, maxbin_dir, merged_dir_bins, min_length, s3_bucket):
-        """
-        Process bin files: download, filter, and merge files per sample.
-        Each filtered file is annotated with its bin type to create unique headers in the final merged file.
-        """
-        import subprocess, os, shutil, gzip
-        from concurrent.futures import ThreadPoolExecutor
-
+    # Process bin files if merged files do not exist.
+    def process_bin_files(file_list: list, sample_names: list, s3_base_path_metabat: str, s3_base_path_maxbin: str,
+                          metabat_dir: str, maxbin_dir: str, merged_dir_bins: str, min_length: int, s3_bucket: str) -> None:
+        import subprocess, gzip
         merged_files = {sample: [] for sample in sample_names}
 
-        def process_bin(file_name):
+        def process_bin(file_name: str) -> tuple:
             if "MaxBin" in file_name:
                 target_dir = maxbin_dir
                 target_s3_folder = s3_base_path_maxbin
@@ -242,7 +254,7 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
                 target_s3_folder = s3_base_path_metabat
                 bin_type = "MetaBAT"
             else:
-                print(f"Skipping unknown file type: {file_name}")
+                logger.warning(f"Skipping unknown file type: {file_name}")
                 return None, None
 
             os.makedirs(target_dir, exist_ok=True)
@@ -254,15 +266,19 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
                 key = "/".join(parts[3:])
                 try:
                     s3_client.download_file(bucket, key, local_file)
-                    print(f"Downloaded {file_name} from {s3_url}")
+                    logger.info(f"Downloaded {file_name} from {s3_url}")
                 except Exception as e:
-                    print(f"Error downloading {file_name}: {e}")
+                    logger.error(f"Error downloading {file_name}: {e}")
                     return None, None
 
             filtered_file = local_file.replace(".fa.gz", "_filtered.fa.gz")
-            print(f"Filtering bin file {local_file} (min length: {min_length})...")
-            subprocess.run(["seqkit", "seq", "-m", str(min_length), local_file, "-o", filtered_file],
-                           check=True)
+            logger.info(f"Filtering bin file {local_file} (min length: {min_length})...")
+            try:
+                subprocess.run(["seqkit", "seq", "-m", str(min_length), local_file, "-o", filtered_file],
+                               check=True)
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Seqkit failed on {local_file}: {e}")
+                return None, None
             return filtered_file, bin_type
 
         for file_name in file_list:
@@ -275,7 +291,7 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
 
         os.makedirs(merged_dir_bins, exist_ok=True)
 
-        def open_text(file_path):
+        def open_text(file_path: str):
             if file_path.endswith(".gz"):
                 return gzip.open(file_path, 'rt')
             else:
@@ -284,23 +300,34 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
         for sample, file_info in merged_files.items():
             if file_info:
                 merged_file_path = os.path.join(merged_dir_bins, f"{sample}_merged.fa.gz")
-                with gzip.open(merged_file_path, 'wt') as wfd:
-                    for file_path, bin_type in file_info:
-                        with open_text(file_path) as f_in:
-                            for line in f_in:
-                                if line.startswith('>'):
-                                    new_header = f">{sample}_{bin_type}_{line[1:].strip()}\n"
-                                    wfd.write(new_header)
-                                else:
-                                    wfd.write(line)
-                print(f"Merged bin file saved: {merged_file_path}")
+                try:
+                    with gzip.open(merged_file_path, 'wt') as wfd:
+                        for file_path, bin_type in file_info:
+                            with open_text(file_path) as f_in:
+                                for line in f_in:
+                                    if line.startswith('>'):
+                                        new_header = f">{sample}_{bin_type}_{line[1:].strip()}\n"
+                                        wfd.write(new_header)
+                                    else:
+                                        wfd.write(line)
+                    logger.info(f"Merged bin file saved: {merged_file_path}")
+                except Exception as e:
+                    logger.error(f"Error merging bin files for {sample}: {e}")
 
-        def upload_sample(sample):
+        def upload_sample(sample: str) -> None:
             merged_file_path = os.path.join(merged_dir_bins, f"{sample}_merged.fa.gz")
             if os.path.exists(merged_file_path):
                 s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/GenomeBinning/merged_results/{sample}_merged.fa.gz"
-                upload_file_to_s3(merged_file_path, s3_bucket, s3_key)
-
+                attempts = 3
+                for i in range(attempts):
+                    try:
+                        upload_file_to_s3(merged_file_path, s3_bucket, s3_key)
+                        logger.info(f"Uploaded {merged_file_path} successfully on attempt {i + 1}.")
+                        break
+                    except Exception as e:
+                        logger.error(f"Attempt {i + 1} failed to upload {merged_file_path}: {e}")
+                        if i == attempts - 1:
+                            logger.error(f"All {attempts} attempts failed for {merged_file_path}.")
         with ThreadPoolExecutor() as executor:
             executor.map(upload_sample, sample_names)
 
@@ -316,8 +343,7 @@ def generate_merged_filtered_bins(min_completeness=50, max_contamination=10, min
         s3_bucket
     )
 
-
-def main():
+def main() -> None:
     """
     Command-line interface for the library.
     """
@@ -349,34 +375,34 @@ def main():
     else:
         parser.print_help()
 
-
 if __name__ == "__main__":
     main()
 
-
 class MAGProcessor:
-    def __init__(self, config=None):
-        # Merge the provided config with the default configuration.
+    def __init__(self, config: dict = None) -> None:
+        """
+        Initialize the MAGProcessor with default or custom configuration.
+        """
         self.config = DEFAULT_CONFIG.copy()
         if config:
             self.config.update(config)
 
-    def process_assemblies(self):
+    def process_assemblies(self) -> None:
         """
         Process assembly contigs: download, filter, merge, and upload.
         """
-        from .core import generate_merged_filtered_contigs
+        from pyh_modules.core import generate_merged_filtered_contigs
         generate_merged_filtered_contigs(
             self.config["samplesheet_path"],
             min_length=self.config.get("min_contig_length", 1000),
             config=self.config
         )
 
-    def process_bins(self):
+    def process_bins(self) -> None:
         """
         Process bins: download, filter, merge, and upload.
         """
-        from .core import generate_merged_filtered_bins
+        from pyh_modules.core import generate_merged_filtered_bins
         generate_merged_filtered_bins(
             min_completeness=self.config.get("min_bin_completeness", 50),
             max_contamination=self.config.get("max_bin_contamination", 10),

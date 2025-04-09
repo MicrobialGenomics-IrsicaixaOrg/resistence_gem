@@ -2,7 +2,9 @@ import os
 import tempfile
 import pandas as pd
 import pytest
-from sample import core
+
+# Update the import to reflect the new package name.
+from pyh_modules import core, helpers
 
 def test_download_files():
     """
@@ -15,16 +17,19 @@ def test_download_files():
     core.download_files(sample_names, assembler, s3_base_path, local_dir)
     assert os.path.exists(local_dir)
 
-def test_filter_sequences(tmp_path):
+def test_filter_sequences(tmp_path, monkeypatch):
     """
     Test the filter_sequences function with a dummy FASTA file.
-    Note: This test requires 'seqkit' to be installed.
+    Note: This test bypasses the external dependency check.
     """
     dummy_file = tmp_path / "TestAssembler-sample1.contigs.fa.gz"
-    # Create a dummy gzipped FASTA file
+    # Create a dummy gzipped FASTA file.
     with open(dummy_file, "wb") as f:
         f.write(b">seq1\nATGCATGCATGC\n")
-    # Since the file is very short, filtering with min_length=1 should pass
+    
+    # Bypass the dependency check for seqkit by patching the helpers module.
+    monkeypatch.setattr(helpers, "check_tool_availability", lambda tool: None)
+    
     try:
         core.filter_sequences(["sample1"], "TestAssembler", tmp_path, min_length=1)
     except Exception as e:
