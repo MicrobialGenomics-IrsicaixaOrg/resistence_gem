@@ -8,7 +8,10 @@ Features
 - Download assembly contigs (MEGAHIT/SPAdes) and bins (MetaBAT2/MaxBin2) from S3.
 - Filter sequences by length and quality metrics.
 - Merge results from multiple tools.
-- Upload processed files back to S3.
+- Support for resumable uploads: if an upload fails (e.g., due to temporary network or SSL issues),
+  the pipeline will log the error and retry the upload.
+- Configurable re-upload: use the *force_upload* parameter to force re-upload even when local
+  merged files exist.
 
 Installation
 ------------
@@ -90,18 +93,31 @@ You can place the samplesheet anywhere (for example, in the repository root or i
 
 ### Default Configurations
 
-Default settings are defined in ``sample/constants.py``. Key parameters include:
+The default configuration in ``pyh_modules/constants.py`` includes parameters such as:
 
 .. code-block:: python
 
     DEFAULT_CONFIG = {
-        "min_contig_length": 1000,      # Minimum contig length (bp)
-        "min_bin_completeness": 50,     # Minimum bin completeness (%)
-        "max_bin_contamination": 10,    # Maximum bin contamination (%)
-        "samplesheet_path": "samplesheet.csv",  # Path to the samplesheet
-        "local_work_dir": "./processing_results",  # Directory for processing results
-        "nf_mag_subfolder": "nf_mag"    # S3 subfolder for processed files
+        "min_contig_length": 1000,
+        "min_bin_completeness": 50,
+        "max_bin_contamination": 10,
+        "samplesheet_path": "samplesheet.csv",
+        "local_work_dir": "./processing_results",
+        "nf_mag_subfolder": "nf_mag",
+        "force_upload": False  # If True, forces re-upload of merged files, even if they exist locally.
     }
+
+To force re-upload (for example, if you want to overwrite existing files on S3), set the configuration:
+
+.. code-block:: python
+
+    custom_config = {
+        "samplesheet_path": "/path/to/your/samplesheet.csv",
+        "local_work_dir": "/path/to/your/results",
+        "force_upload": True
+    }
+    processor = MAGProcessor(config=custom_config)
+    processor.process_bins()
 
 Usage
 -----
@@ -129,7 +145,8 @@ Alternatively, you can use the library programmatically:
     # Or, using a custom configuration
         custom_config = {
         "samplesheet_path": "/home/user/Documents/data/samplesheet.csv",
-        "local_work_dir": "/home/user/Documents/data/results"
+        "local_work_dir": "/home/user/Documents/data/results",
+        "force_upload": True  # Force re-upload if needed
     }
  
     processor = MAGProcessor(config=custom_config)

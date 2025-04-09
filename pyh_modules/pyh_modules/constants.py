@@ -4,6 +4,7 @@ DEFAULT_CONFIG = {
     "max_bin_contamination": 10,
     "samplesheet_path": "samplesheet.csv",
     "local_work_dir": "./processing_results",
-    "nf_mag_subfolder": "nf_mag"
+    "nf_mag_subfolder": "nf_mag",
+    "force_upload": False  # New flag: if True, re-upload merged files even if they exist
 }
 
