@@ -107,6 +107,8 @@ The default configuration in ``pyh_modules/constants.py`` includes parameters su
         "force_upload": False  # If True, forces re-upload of merged files, even if they exist locally.
     }
 
+By enabling *force_upload*, both the assembly and bin processing pipelines will attempt to re-upload files (using retries) even if the merged files are already present locally. This allows you to overwrite files on S3 in case of previous upload failures or if you intentionally want to refresh the remote copy.
+
 To force re-upload (for example, if you want to overwrite existing files on S3), set the configuration:
 
 .. code-block:: python

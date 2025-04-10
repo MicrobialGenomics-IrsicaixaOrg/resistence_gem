@@ -96,11 +96,17 @@ def merge_filtered_files(sample_names: list, assembly_dir: str, merged_dir: str)
         else:
             logger.warning(f"One or both files missing for {sample}, skipping merge.")
 
-def generate_merged_filtered_contigs(samplesheet_path: str, min_length: int = 1000, config: dict = DEFAULT_CONFIG) -> None:
+def generate_merged_filtered_contigs(samplesheet_path, min_length=1000, config=DEFAULT_CONFIG):
     """
     Process contigs: download, filter, merge and upload.
     Implements a checkpoint to skip download/filter/merge if merged files already exist.
+    If force_upload is True, it forces re-upload even if merged files are present locally.
     """
+    import os
+    import pandas as pd
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Load samplesheet and setup paths
     samplesheet_path = config.get("samplesheet_path", "samplesheet.csv")
     df = pd.read_csv(samplesheet_path)
     sample_names = df["sample"].tolist()
@@ -113,24 +119,41 @@ def generate_merged_filtered_contigs(samplesheet_path: str, min_length: int = 10
     local_work_dir = config.get("local_work_dir", os.getcwd())
     assembly_dir = os.path.join(local_work_dir, "Assembly_results")
     merged_dir_out = os.path.join(assembly_dir, "merged_results")
+    
+    force_upload = config.get("force_upload", False)
 
-    # Check for merged files and skip processing if they exist
+    # Check if merged contig files exist for all samples.
     if os.path.exists(merged_dir_out):
         merged_files_exist = all(
             os.path.exists(os.path.join(merged_dir_out, f"{sample}_merged.fa.gz"))
             for sample in sample_names
         )
-        if merged_files_exist:
-            logger.info("Merged contig files found. Skipping download, filtering, and merging. Uploading merged files only.")
+        if merged_files_exist or force_upload:
+            if merged_files_exist and not force_upload:
+                logger.info("Merged contig files found. Skipping download, filtering, and merging. Uploading merged files only.")
+            elif force_upload:
+                logger.info("force_upload enabled: Re-uploading merged contig files even if they exist.")
+            
             s3_bucket = s3_root_path.split("/")[2]
+            
             def upload(sample: str) -> None:
                 local_file = os.path.join(merged_dir_out, f"{sample}_merged.fa.gz")
                 s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/Assembly/merged_results/{sample}_merged.fa.gz"
-                upload_file_to_s3(local_file, s3_bucket, s3_key)
+                attempts = 3
+                for i in range(attempts):
+                    try:
+                        upload_file_to_s3(local_file, s3_bucket, s3_key)
+                        logger.info(f"Uploaded {local_file} successfully on attempt {i + 1}.")
+                        break  # Success
+                    except Exception as e:
+                        logger.error(f"Attempt {i + 1} failed to upload {local_file}: {e}")
+                        if i == attempts - 1:
+                            logger.error(f"All {attempts} attempts failed for {local_file}.")
             with ThreadPoolExecutor() as executor:
                 executor.map(upload, sample_names)
             return
 
+    # Otherwise, run the full pipeline: download, filter and merge
     logger.info("Processing contigs: downloading, filtering, merging, and uploading.")
     download_files(sample_names, "MEGAHIT", s3_megahit_path, os.path.join(assembly_dir, "MEGAHIT"))
     download_files(sample_names, "SPAdes", s3_spades_path, os.path.join(assembly_dir, "SPAdes"))
@@ -145,8 +168,16 @@ def generate_merged_filtered_contigs(samplesheet_path: str, min_length: int = 10
     def upload(sample: str) -> None:
         local_file = os.path.join(merged_dir_out, f"{sample}_merged.fa.gz")
         s3_key = f"{DEFAULT_CONFIG['nf_mag_subfolder']}/Assembly/merged_results/{sample}_merged.fa.gz"
-        upload_file_to_s3(local_file, s3_bucket, s3_key)
-
+        attempts = 3
+        for i in range(attempts):
+            try:
+                upload_file_to_s3(local_file, s3_bucket, s3_key)
+                logger.info(f"Uploaded {local_file} successfully on attempt {i + 1}.")
+                break  # Exit loop on success
+            except Exception as e:
+                logger.error(f"Attempt {i + 1} failed to upload {local_file}: {e}")
+                if i == attempts - 1:
+                    logger.error(f"All {attempts} attempts failed for {local_file}.")
     with ThreadPoolExecutor() as executor:
         executor.map(upload, sample_names)
 
@@ -371,17 +402,15 @@ if __name__ == "__main__":
     main()
 
 class MAGProcessor:
-    def __init__(self, config: dict = None) -> None:
-        """
-        Initialize the MAGProcessor with default or custom configuration.
-        """
+    def __init__(self, config=None):
         self.config = DEFAULT_CONFIG.copy()
         if config:
             self.config.update(config)
 
-    def process_assemblies(self) -> None:
+    def process_assemblies(self):
         """
         Process assembly contigs: download, filter, merge, and upload.
+        Uses the force_upload option if provided.
         """
         from pyh_modules.core import generate_merged_filtered_contigs
         generate_merged_filtered_contigs(
@@ -390,9 +419,10 @@ class MAGProcessor:
             config=self.config
         )
 
-    def process_bins(self) -> None:
+    def process_bins(self):
         """
         Process bins: download, filter, merge, and upload.
+        Uses the force_upload option if provided.
         """
         from pyh_modules.core import generate_merged_filtered_bins
         generate_merged_filtered_bins(
