@@ -1,0 +1,13 @@
+# Core requirements
+boto3>=1.20.0
+pandas>=1.3.0
+
+# For development and testing
+pytest>=6.0.0
+pytest-cov>=2.0.0
+flake8>=3.9.0
+black>=21.0
+
+# For documentation (if needed)
+sphinx>=4.0.0
+sphinx-rtd-theme>=0.5.0
